@@ -1,0 +1,992 @@
+---
+title: Assignment 1  
+author: | 
+  | Group 7
+  | Bruna Travassos - 06019712
+  | Xucheng Yang - 06003464
+  | Louis Kenyon - 06029848
+  | Mike Limnidis - 06013422
+  | Katrina Ho - 06007111
+  | Business School, Imperial College London
+  | 
+  
+date: "22/01/2025"
+output:
+  pdf_document: default
+  word_document: default
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+\newpage 
+\tableofcontents 
+\listoffigures 
+\listoftables 
+\newpage
+
+# Question 1 - Returns Statistics
+
+This section evaluates whether the daily log returns of equity indices
+can be reasonably approximated as an **i.i.d. Gaussian process**.
+
+### **Conditions for an i.i.d. Gaussian Process**
+
+1.  **Independence**: Returns should be independent over time, meaning
+    the value of one return does not depend on previous returns. This is
+    evaluated using autocorrelation analysis.
+2.  **Identically Distributed**: Returns should have the same
+    distribution over time, with constant mean and variance. This is
+    assessed using rolling statistics.
+3.  **Gaussian Distribution**: Returns should follow a normal
+    distribution, characterized by:
+    -   Mean of 0 (or close to 0).
+    -   Skewness of 0 (symmetry).
+    -   Kurtosis of 3 (no heavy tails).
+
+### **Steps in Analysis**
+
+The analysis will follow these steps: 1. Compute daily log returns for
+each index. 2. Evaluate summary statistics to assess Gaussian
+properties. 3. Calculate the correlation matrix to explore relationships
+between indices. 4. Examine autocorrelation to test for independence. 5.
+Analyze rolling statistics to assess identical distribution. 6. Conclude
+on whether the i.i.d. Gaussian assumptions are satisfied.
+
+## Libraries, Packages and Data
+
+The necessary libraries are loaded, and the provided data is imported
+for analysis.
+
+```{r, message=FALSE, warning=FALSE}
+
+# Load libraries
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(knitr)
+library(zoo)
+library(readxl)
+library(lubridate)
+library(quadprog)
+library(readr)
+library(moments)
+
+# Load the Excel file
+PS1_data <- read_excel("PS1_data.xls")
+```
+
+## Data Preparation
+
+The raw data is extracted and cleaned for analysis. We convert all index
+prices to USD using the foreign exchange rates for comparability across
+markets.
+
+```{r}
+
+# Extract relevant sections
+date_column <- PS1_data[, 1] # First column contains dates
+equity_indices <- PS1_data[3:nrow(PS1_data), 2:9] # Extract index columns
+fx_rates <- PS1_data[3:nrow(PS1_data), c(11, 12, 15, 16, 17, 18)] # Extract forex columns
+
+# Rename columns
+colnames(equity_indices) <- c("TSX", "CAC", "DAX", "Eurostox50", "Nikkei225", "FTSE100",
+                              "SPX", "IBOV")
+colnames(fx_rates) <- c("CAD", "EUR", "JPY", "GBP", "USD", "BRL")
+
+# Convert index and forex data to numeric format
+equity_indices <- equity_indices %>% mutate(across(everything(), as.numeric))
+fx_rates <- fx_rates %>% mutate(across(everything(), as.numeric))
+
+# Adjust all index prices to USD
+indices_in_usd <- equity_indices %>%
+  mutate(
+    TSX = TSX * fx_rates$CAD,
+    CAC = CAC * fx_rates$EUR,
+    DAX = DAX * fx_rates$EUR,
+    Eurostox50 = Eurostox50 * fx_rates$EUR,
+    Nikkei225 = Nikkei225 * fx_rates$JPY,
+    FTSE100 = FTSE100 * fx_rates$GBP,
+    SPX = SPX, # Already in USD
+    IBOV = IBOV * fx_rates$BRL)
+```
+
+## Compute Daily Log Returns
+
+To compute the daily log returns for each index, we use the formula:
+
+$\text{log return} = \log\left(\frac{P_t}{P_{t-1}}\right)$
+
+Where:
+
+\- $P_t$ is the price of the index at time $t$.
+
+\- $P_{t-1}$ is the price of the index on the previous day.
+
+```{r}
+# Compute daily log returns for each index
+log_returns <- indices_in_usd %>%
+  mutate(across(everything(), ~ log(. / lag(.)))) # Apply log return formula to columns
+
+# Remove rows with NA values (first row will have NA due to lagging)
+log_returns <- log_returns %>%
+  drop_na()
+```
+
+## Summary Statistics
+
+We calculate summary statistics—mean, standard deviation, skewness, and
+kurtosis—to evaluate the normality of returns.
+
+```{r}
+# Calculate summary statistics
+summary_stats <- data.frame(
+  Mean = apply(log_returns, 2, mean, na.rm = TRUE),
+  Std_Dev = apply(log_returns, 2, sd, na.rm = TRUE),
+  Skewness = apply(log_returns, 2, skewness, na.rm = TRUE),
+  Kurtosis = apply(log_returns, 2, kurtosis, na.rm = TRUE))
+
+# Print Results with Formatting
+kable(
+  summary_stats,
+  format = "markdown",
+  caption = "Summary Statistics of Log Returns")
+```
+
+The results indicate that the return distributions do not approximate a
+Gaussian distribution due to:
+
+-   **Asymmetry**: Skewness values deviate from 0.
+
+-   **Heavy Tails**: Kurtosis values far exceed 3.
+
+These findings imply the presence of non-normality in the return
+distributions.
+
+## Correlation Matrix
+
+The correlation matrix shows the pairwise relationships between the
+daily log returns of the different indices.
+
+```{r}
+# Compute correlation matrix
+correlation_matrix <- cor(log_returns, use = "pairwise.complete.obs")
+
+# Display correlation matrix with formatting
+kable(
+  correlation_matrix,
+  format = "markdown",
+  caption = "Correlation Matrix of Log Returns")
+```
+
+**Strong Interdependencies**: The high correlations among indices,
+particularly within Europe, indicate significant interdependencies,
+which are essential for understanding relationships between assets.
+
+**Relevance to i.i.d. Assumption**: These interdependencies do not
+directly affect the i.i.d. analysis, as it focuses on temporal
+independence and identical distribution for individual indices. However,
+they are crucial considerations for portfolio diversification.
+
+## Independence - Autocorrelation
+
+To evaluate independence, we examine the autocorrelation function (ACF)
+of the log returns. Independence implies minimal lagged correlations.
+
+```{r, fig.width=10, fig.height=8}
+# Visualize autocorrelation for each index
+par(mfrow = c(4, 2))  # Organize plots in a 4x2 grid
+for (i in colnames(log_returns)) {
+  acf(na.omit(log_returns[[i]]), main = paste("ACF of", i))}
+```
+
+**The ACF plots indicate that the daily log returns for the indices are
+approximately independent over time.**
+
+-   **Minimal Significant Lags**:\
+    Most indices exhibit minimal significant autocorrelation, with
+    values generally within the 95% confidence interval (blue dashed
+    lines).\
+    Even for indices with slight deviations at specific lags (e.g.,
+    Nikkei225), the magnitude of autocorrelations is small, indicating
+    weak temporal dependence.
+
+-   **Practical Independence**:\
+    The results suggest that past returns have little to no influence on
+    current returns for these indices, supporting the independence
+    assumption for an i.i.d. process.
+
+## Identically Distributed - Rolling Statistics
+
+Rolling mean and variance are calculated to check if returns are
+identically distributed over time.
+
+```{r, message=FALSE, warning=FALSE}
+# Define rolling window size
+rolling_window <- 50
+
+# Calculate rolling mean and variance for each index
+rolling_stats <- lapply(log_returns, function(x) {
+  data.frame(
+    Rolling_Mean = rollapply(x, rolling_window, mean, na.rm = TRUE, fill = NA),
+    Rolling_Variance = rollapply(x, rolling_window, var, na.rm = TRUE, fill = NA))})
+
+# Plot rolling mean and variance
+par(mfrow = c(2, 4))  # Arrange plots in a 2x4 layout
+for (i in 1:length(rolling_stats)) {
+  index_name <- names(rolling_stats)[i]
+  
+  plot(
+    rolling_stats[[i]]$Rolling_Mean,
+    type = "l",
+    col = "blue",
+    main = paste("Rolling Mean of", index_name),
+    cex.main = 0.8,  # Adjust the title size
+    ylab = "Mean",
+    xlab = "Time")
+  
+  plot(
+    rolling_stats[[i]]$Rolling_Variance,
+    type = "l",
+    col = "red",
+    main = paste("Rolling Variance of", index_name),
+    cex.main = 0.8,  # Adjust the title size
+    ylab = "Variance",
+    xlab = "Time")}
+```
+
+-   **Rolling Mean**:\
+    The rolling mean for all indices remains stable around zero,
+    supporting the identically distributed assumption for the mean
+    component.
+
+-   **Rolling Variance**:\
+    The rolling variance shows spikes, reflecting time-varying
+    volatility and deviating from the identically distributed
+    assumption.
+
+## Conclusion: Evaluation of i.i.d. Gaussian Assumption
+
+This analysis evaluates whether the daily log returns of equity indices
+satisfy the conditions for an i.i.d. Gaussian process:
+
+-   **Independence**:\
+    The autocorrelation results indicate that most indices are
+    approximately independent, with minimal significant lagged
+    correlations within the 95% confidence interval.
+
+-   **Identically Distributed**:\
+    Rolling statistics show that while the rolling mean remains stable
+    around zero, the rolling variance exhibits noticeable spikes,
+    reflecting time-varying volatility. This indicates that returns are
+    not strictly identically distributed.
+
+-   **Normality**:\
+    Skewness and kurtosis values show deviations from Gaussian
+    properties, indicating asymmetry and heavy tails in the return
+    distributions.
+
+**Final Assessment**:\
+While the independence assumption is reasonably supported, the returns
+fail to meet the i.i.d. Gaussian assumptions due to non-normality and
+time-varying variance.
+
+# Question 2 - MV Analysis #1
+
+## Data Preparation
+
+```{r message=F, warning=F}
+ff_data <- read.csv("F-F_Research_Data_Factors_daily.CSV", skip = 4, fill = TRUE, check.names = FALSE)
+colnames(ff_data) <- c("Date", "Mkt_RF", "SMB", "HML", "RF")
+ff_data$Date <- as.Date(as.character(ff_data$Date), format = "%Y%m%d")
+risk_free_rate  <- ff_data[, c(1,5)]
+
+# Remove the first two rows with NAs and correctly format column names
+colnames(PS1_data)[2:9] <- as.character(PS1_data[2, 2:9])
+PS1_data <- PS1_data[-c(1, 2), ]
+
+
+# Separate prices from exchange rates, calculate returns in USD and merge returns, dates and risk free rate into one dataframe:
+
+dates <- PS1_data[,1]
+colnames(dates)[1] <- "Date"
+dates$Date <- mdy(dates$Date)
+
+#Extract the indices portion of the dataframne and convert fromm chr to num
+indices <- PS1_data[, 2:9] %>% 
+  mutate(across(where(is.character), as.numeric))
+
+exchange_rates <- PS1_data[, 11:18]
+
+indices_in_usd <- indices * exchange_rates
+
+#Compute returns for each index, the first row is NA as there is no return calculable here
+returns <- as.data.frame(lapply(indices_in_usd, function(prices) {
+  c(NA, diff(prices) / prices[-length(prices)]) 
+  #c(NA, diff(log(prices)))
+}))
+returns <- cbind(dates, returns)
+
+merged_data <- merge(returns[-1,], risk_free_rate[-1,], by = "Date", all.x = TRUE)
+```
+
+## Efficient Frontier Portfolio Weights (Shorts Allowed)
+
+```{r solution}
+
+#Constants
+trading_days = 252
+allow_short = FALSE
+
+#Standardise returns
+daily_returns_matrix = returns[-1, -1]
+
+daily_risk_free_rate = ((1 + merged_data$RF[-1])^(1/trading_days)) - 1
+annualised_risk_free_rate <- exp(mean(daily_risk_free_rate) * trading_days) / 100
+
+annualised_returns = colMeans(returns[,-1], na.rm = TRUE) * trading_days
+annualised_risks = apply(returns[,-1], 2, sd, na.rm = TRUE) * sqrt(trading_days)
+
+# Combine into a data frame for visualisation
+portfolio_assets <- data.frame(
+  Tickers = colnames(returns[,-1]),
+  Annualised_Return = annualised_returns,
+  Annualised_Risk = annualised_risks
+)
+
+#E(Ri) = rm - rf
+excess_returns <- daily_returns_matrix - daily_risk_free_rate
+mu <- colMeans(excess_returns, na.rm = TRUE) * trading_days
+
+#Calculate the covariance matrix
+var_cov_matrix <- cov(daily_returns_matrix, use = "complete.obs") * trading_days
+
+# Initialise dataframe and list for storing efficient frontier and risk info
+efficient_frontier <- data.frame(Return = numeric(0), Risk = numeric(0))
+efficient_weights <- list()
+
+#Calculate optimal portfolio to get an upper bound for our target returns
+n_assets <- length(mu)
+  
+# Enforce that all available capital is allocated & portfolio must achieve tgt rtn (?) 
+A0 <- cbind(rep(1, n_assets))  
+b0 <- c(1) #r_target)
+result <- solve.QP(
+  Dmat = var_cov_matrix,  
+  dvec = mu,           
+  Amat = A0,           
+  bvec = b0,           
+  meq = 1             # Number of equality constraints
+)
+  
+# Extract weights
+op_weights <- result$solution
+target_return = sum(op_weights * mu)#op_weights %*% annualised_returns
+
+#Iterate over target return sequence and compute efficient frontier
+for (r_target in seq(min(mu), target_return, length.out = 50)) {
+  n_assets <- length(mu)
+  
+  # Enforce that all available capital is allocated & portfolio must achieve tgt rtn (?) 
+  A <- cbind(rep(1, n_assets),mu)  
+  b <- c(1, r_target)
+  dv = rep(0,n_assets)
+  result <- solve.QP(
+    Dmat = var_cov_matrix,  
+    dvec = dv,           
+    Amat = A,           
+    bvec = b,           
+    meq = 2             # Number of equality constraints
+  )
+  
+  # Extract weights
+  weights <- result$solution
+  
+  # Calculate portfolio return and risk
+  portfolio_return <- sum(weights * mu)
+  portfolio_risk <- sqrt(t(weights) %*% var_cov_matrix %*% weights)
+  
+  # Store the efficient frontier values
+  efficient_frontier <- rbind(
+    efficient_frontier,
+    data.frame(Return = portfolio_return, Risk = portfolio_risk)
+  )
+  
+  # Store the weights for later analysis
+  efficient_weights[[as.character(r_target)]] <- weights
+}
+
+# Calculate Sharpe ratio for each portfolio on the efficient frontier
+efficient_frontier$Sharpe <- (efficient_frontier$Return - annualised_risk_free_rate) / 
+  efficient_frontier$Risk
+
+# Find the tangent portfolio (maximum Sharpe ratio)
+op_portfolio_x <-sqrt(op_weights %*% var_cov_matrix %*% op_weights)
+op_y <- op_weights%*%mu
+
+efficient_portfolio_weights <- data.frame(
+  Tickers = colnames(returns[,-1]),
+  Weights = op_weights
+)
+kable(efficient_portfolio_weights, 
+      col.names = c("Ticker", "Weight"), caption = "Efficient Portfolio Weights")
+```
+
+The portfolio weights with short sales allowed exhibit extreme values,
+reflecting the optimiser’s freedom to exploit diversification benefits
+and maximise Sharpe ratio. These extreme weights lead to a highly
+leveraged portfolio, where the sum of absolute weights exceeds 1,
+amplifying both potential returns and risks. While such leverage aligns
+with the theoretical goals of mean-variance optimisation, it can be
+impractical for real-world investors due to regulatory constraints,
+transaction costs, and difficulty of obtaining short positions.
+
+This practical limitation highlights the sensitivity of portfolio
+optimisation to expected return and covariance matrix estimates.
+Short-sale constraints often lead to more balanced portfolios and ensure
+implementability, demonstrating why comparing portfolios with and
+without short sales provides valuable insights into both the theoretical
+potential and practical limitations of mean-variance analysis.
+
+### Notes to analysis
+
+-   The risk free rate has been annualised as follows, this is because
+    our source for the risk free rate was the daily quoted 1-month
+    t-bill rate and it required conversion to a daily continuously
+    compounded interest rate for use in
+    calculations.$(1 + \text{mean daily risk-free rate})^{1/\text{trading days}} - 1$
+
+-   **Generation Of Target Returns**
+
+    Target returns are generated from the minimum expected return to the
+    maximum target return as follows:
+
+    -   For each target return:
+        -   The portfolio weights are calculated using `solve.QP` with
+            constraints for the target return and full capital
+            allocation.
+        -   The portfolio's return and risk are computed as follows:
+            -   $\text{Portfolio Return} = \sum (\text{weights} \times \mu)$
+            -   $\text{Portfolio Risk} = \sqrt{\text{weights}^T \cdot \text{covariance matrix} \cdot \text{weights}}$
+        -   The values are added to the efficient frontier data frame,
+            and the weights are stored for later analysis.
+
+-   **Calculating Sharpe Ratio**
+
+    The Sharpe ratio for each portfolio on the efficient frontier is
+    computed using
+
+-   $\text{Sharpe Ratio} = \frac{\text{Portfolio Return} - \text{Risk-Free Rate}}{\text{Portfolio Risk}}$
+
+-   **Identifying the Tangency Portfolio**
+
+    The tangency portfolio is the portfolio on the efficient frontier
+    with the maximum Sharpe ratio. Its weights are extracted from the
+    list of stored weights.
+
+```{r fig.cap="Annualised Historical Returns and Efficient Frontier"}
+asset_names <- c("TSX", "CAC", "DAX", "Eurostoxx50", "NIKKEI225", "FTSE100", "SP500", "IBOVESPA") 
+portfolio_assets$Asset_Names <- asset_names  
+
+ggplot() +  
+  # Plot efficient frontier  
+  geom_point(data = efficient_frontier, aes(x = Risk, y = Return, 
+                                            color = "Efficient Frontier"), size = 1) +  
+  
+  # Mark tangent portfolio  
+  geom_point(aes(x = op_portfolio_x, y = op_y, 
+                 color = "Tangency Portfolio"),   
+             size = 4, shape = 17) +  
+  
+  # Plot constituent assets risk/return with asset names in legend  
+  geom_point(data = portfolio_assets, aes(x = Annualised_Risk, y = Annualised_Return, color = Asset_Names),  
+             size = 3) +  
+  
+  # Risk-free rate  
+  geom_hline(yintercept = annualised_risk_free_rate, linetype = "dashed", color = "black") +  
+  
+  # Labels and legend title  
+  labs(  
+    x = "Risk (Standard Deviation)",  
+    y = "Return",  
+    color = "Legend"  
+  ) +  
+  
+  theme(  
+    legend.position = "right",   # Move the legend to the right-hand side  
+    legend.box = "vertical",    # Stack legend items vertically  
+    legend.title = element_text(size = 10),  # Adjust legend title size  
+    legend.text = element_text(size = 9)     # Adjust legend text size  
+  )
+
+
+```
+
+## No short sale restriction
+
+```{r fig.cap="Markowitz Frontier under non-negative restriction"}
+means <- mu 
+cov_matrix <- var_cov_matrix 
+# set a initial range of returns (some of them we can not generate)
+target_returns <- seq(2*min(means), 2*max(means), length.out = 1000)   
+  
+risks <- numeric(length(target_returns))  
+weights <- matrix(0, nrow = length(target_returns), ncol = length(means))  
+  
+valid_points <- rep(TRUE, length(target_returns))  
+  
+for (i in seq_along(target_returns)) {  
+  target_return <- target_returns[i]  
+  #minimize cov-variance to plot the Froniter
+  Dmat <- cov_matrix  
+  dvec <- rep(0, length(means))  
+  Amat <- cbind(1, means, diag(length(means)))    
+  bvec <- c(1, target_return, rep(0, length(means)))  
+  meq <- 2  
+    
+  result <- tryCatch({  
+    solve.QP(Dmat, dvec, Amat, bvec, meq)  
+  }, error = function(e) {  
+    valid_points[i] <- FALSE    #if we can't generate this result, return null
+    return(NULL)   
+    })  
+    
+  if (is.null(result)) next  #select those returns that we can generate
+    
+  risks[i] <- sqrt(2*result$value)   
+  weights[i, ] <- result$solution    
+  }  
+  
+  
+target_returns <- target_returns[valid_points]  
+risks <- risks[valid_points]  
+  
+valid_indices <- which(risks > 0 & !duplicated(target_returns))  
+target_returns <- target_returns[valid_indices]  
+risks <- risks[valid_indices]  
+  
+if (length(risks) > 0 && length(target_returns) > 0) {  
+  # get the optimal weights under non-negative constrain
+  non_opt_Amat <- cbind(1, diag(length(means)))  
+  non_opt_bvec <- c(1,  rep(0, length(means)))  
+  non_opt_meq <- 1
+  non_opt_result <-solve.QP(cov_matrix, means, non_opt_Amat, non_opt_bvec, non_opt_meq)
+  non_opt_value <- non_opt_result$solution %*% means
+  non_opt_risk <- sqrt(2*(non_opt_result$value+non_opt_value))
+  max_slope <- non_opt_value/non_opt_risk
+    
+  #plot the annualized return of each asset
+  asset_risks <- sqrt(diag(cov_matrix))  
+  asset_returns <- means
+  #set the range of the whole plot
+  xlim_range <- range(min(sqrt(diag(cov_matrix)))-0.1,max(sqrt(diag(cov_matrix)))+0.05)   
+  
+  ylim_range <- range(min(means)*1.1,max(means)*1.1)   
+
+  plot(risks, target_returns, type = "l", col = "blue", lwd = 2,  
+        xlab = "Risk (Standard Deviation)", ylab = "Expected Return",  
+         xlim=xlim_range,ylim=ylim_range)  
+    
+  #abline(a = 0, b = max_slope, col = "red", lwd = 2, lty = 2)   
+  points(non_opt_risk, non_opt_value, col = "red", pch = 19, cex = 1.5)   
+    
+  colors <- rainbow(length(asset_risks))    
+  points(asset_risks, asset_returns, col = colors, pch = 17, cex = 1.2)   
+  legend("topleft",   
+      legend = c(asset_names, "Tangent Point"),   
+      col = c(colors, "red"),    
+      pch = c(rep(17, length(asset_names)), 19),  
+      cex = 0.6)  
+  }  
+```
+
+```{r fig.cap = "Efficient Portfolio Weights under Nonnegative Constraint"}
+non_efficient_portfolio_weights <- data.frame(
+  Tickers = colnames(returns[,-1]),
+  Weights = non_opt_result$solution
+)
+kable(non_efficient_portfolio_weights, col.names = c("Ticker", "Weight"))
+```
+
+The portfolio weights with short selling disallowed show that all
+capital is allocated to the S&P 500, other assets have zero weight. By
+prohibiting short positions, the optimiser cannot offset risk by
+diversifying across negatively correlated assets, leading to a
+concentrated portfolio.
+
+This lack of diversification contrasts sharply with the portfolio when
+short selling is allowed. While this concentrated allocation minimises
+volatility relative to expected returns under the constraints. Usually,
+an allocation such as this would expose the portfolio to significant
+idiosyncratic risk, undermining the primary benefit of diversification,
+in this case the asset, SP500 is already a broad market index and in
+theory is free of idiosyncratic risk.
+
+# Question 3 - MV Analysis #2 (Rolling Window)
+
+## Data Preparation
+
+In order to do rolling windows analysis, we have to aggregate data every
+five years. Firstly, we divide dataset from 2010-2021 into different
+segments and calculate their means and cov-variance matrix. Then store
+them into two lists, which are means_list and cov_list.
+
+```{r}
+q3_data <- merged_data
+for (col in 2:(ncol(merged_data) - 1)) {  
+  q3_data[[col]] <- merged_data[[col]] - merged_data[[ncol(merged_data)]]/30  
+}  
+q3_data<- q3_data[, -ncol(q3_data)]
+```
+
+```{r}
+rolling_mean <- function(data, start_year, end_year) {  
+  subset_data <- data[data$Date >= start_year & data$Date <= end_year, ]  
+  colMeans(subset_data[, -1], na.rm = TRUE)*252  
+}  
+
+rolling_cov <- function(data, start_year, end_year) {  
+  subset_data <- data[data$Date >= start_year & data$Date <= end_year, ]  
+  cov_matrix <- cov(subset_data[, -1])*252  
+  return(cov_matrix)  
+} 
+
+means_list <- list()  
+cov_list <- list()  
+for (start_year in seq(2010, 2021 - 5 + 1)) {  
+  end_year <- start_year + 5 - 1  
+  start_year <- paste0(as.character(start_year),'-01-01')
+  end_year <- paste0(as.character(end_year),'-12-31')
+  mean_values <- rolling_mean(q3_data, start_year, end_year)  
+  cov_matrix <- rolling_cov(q3_data, start_year, end_year)  
+  
+  means_list[[paste0(start_year, "-", end_year)]] <- mean_values  
+  
+  cov_list[[paste0(start_year, "-", end_year)]] <- cov_matrix  
+}  
+
+```
+
+## Plotting the Markowitz Frontier
+
+```{r warning=FALSE}
+asset_names <- c("TSX", "CAC", "DAX", "Eurostoxx50", "NIKKEI225", "FTSE100", "SP500", "IBOVESPA") 
+weight_list <- list()   #list to store optimal weights in each windows
+for (i in seq_along(means_list)) {  
+  means <- means_list[[i]]  
+  cov_matrix <- cov_list[[i]]  
+  #solve the optimal function to get the optimal point and decide the range for the whole plot
+  opt_Amat <- matrix(1, nrow = length(means), ncol = 1) 
+  opt_bvec <- 1 
+  opt_meq <- 1
+  opt_result <-solve.QP(cov_matrix, means, opt_Amat, opt_bvec, opt_meq)
+  opt_value <- opt_result$solution %*% means
+  opt_risk <- sqrt(2*(opt_result$value+opt_value))
+  max_slope <- opt_value/opt_risk
+  weight_list[[i]] <- opt_result$solution
+  
+  #generate returns from -1 to 1.1*optimal return
+  target_returns <- seq(-1, opt_value*1.1, length.out = 1000)   
+  
+  risks <- numeric(length(target_returns))  
+  weights <- matrix(0, nrow = length(target_returns), ncol = length(means))  
+  
+  for (j in seq_along(target_returns)) {  
+    target_return <- target_returns[j]  
+    #minimal cov-variance and get respect weights, returns, and risks
+    Dmat <- cov_matrix  
+    dvec <- rep(0, length(means))  
+    Amat <- cbind(1, means)  
+    bvec <- c(1, target_return)  
+    meq <- 2  
+    
+    result <- solve.QP(Dmat, dvec, Amat, bvec, meq)  
+    
+    risks[j] <- sqrt(2*result$value)   
+    weights[j, ] <- result$solution    
+  }  
+  #get annualized return and risk of each asset
+  asset_risks <- sqrt(diag(cov_matrix))  
+  asset_returns <- means 
+  
+  #constrain the range of the whole plot
+  xlim_range <- range(min(sqrt(diag(cov_matrix)))-0.1,opt_risk+0.1)   
+  
+  ylim_range <- range(min(means)-0.1,opt_value+0,1)  
+  
+  plot(risks, target_returns, type = "l", col = "blue", lwd = 2,  
+       xlab = "Risk (Standard Deviation)", ylab = "Expected Return",  
+       main = paste("Markowitz Frontier during ", 2009 + i, "-", 2013 + i),  
+       xlim = xlim_range, ylim = ylim_range)   
+  
+  #abline(a = 0, b = max_slope, col = "red", lwd = 2, lty = 2)   
+  points(opt_risk, opt_value, col = "red", pch = 19, cex = 1.5)  
+  
+  colors <- rainbow(length(asset_risks))    
+  points(asset_risks, asset_returns, col = colors, pch = 17, cex = 1.2)   
+  legend("topleft",   
+       legend = c(asset_names, "Tangent Point"),   
+       col = c(colors, "red"),    
+       pch = c(rep(17, length(asset_names)), 19),  
+       cex = 0.5)
+}
+```
+
+From those plots, we can see that the optimal points change rapidly from
+1.5 to 4 when windows change. But all optimal points remain to be
+extreme compared to any single asset.
+
+## Optimal weights for each asset across rolling windows
+
+In this section, we will analyse the change of optimal weights for each
+asset when we change our rolling windows
+
+```{r}
+# get the optimal weights and store them into a dataframe
+weight_df <- data.frame(do.call(rbind, weight_list))
+rownames(weight_df) <- paste("Dataset", seq_along(weight_df))  
+```
+
+```{r fig.cap="Optimal Weights Across  assets"}
+# plot the optimal weights against rolling windows
+par(mar = c(5, 4, 4, 8), xpd = TRUE)    
+plot(  
+  x = seq_len(nrow(weight_df)),    
+  y = weight_df[, 1],            
+  type = "n",                             
+  xlab = "Window Index",                  
+  ylab = "Weights",                
+  #main = "Optimal Weights Across Assets",   
+  ylim = range(weight_df, na.rm = TRUE)    
+)  
+
+ 
+for (i in seq_len(ncol(weight_df))) {  
+  lines(  
+    x = seq_len(nrow(weight_df)),   
+    y = weight_df[, i],            
+    col = i                                  
+  )  
+}  
+
+legend(  
+  "topright",                              
+  inset = c(-0.3, 0),                        
+  legend = c("TSX", "CAC", "DAX", "Eurostoxx50", "NIKKEI225", "FTSE100", "SP500", "IBOVESPA"),   
+  col = seq_len(ncol(weight_df)),   
+  lty = 1,                                   
+  xpd = TRUE,                                
+  cex = 0.8   
+)
+```
+
+Most assets show fluctuations in their weights across different window
+indices (1 to 8), reflecting changing market conditions or investment
+strategies.
+
+The weight of Eurostoxx50 remains negative and shows a gradual downward
+trend, while the weights of SP500 and DAX remain positive, indicating
+that they are higher-quality assets exhibiting better Sharpe Ratio's.
+When rolling windows change more CAC is added into our portfolio,
+indicative of good performance from the asset.
+
+## Non-negative rolling windows analysis
+
+Under the non-negativity constraint there are some levels of return
+whuch become unobtainable. We therefore use a list (valid_points) to
+store those returns we can generate, and use error function to ignore
+those we cannot.
+
+```{r}
+nonnegative_weight_list <- list()
+for (i in seq_along(means_list)) {  
+  
+  means <- means_list[[i]]  
+  cov_matrix <- cov_list[[i]]  
+  # set a initial range of returns (some of them we can not generate)
+  target_returns <- seq(5*min(means), 5*max(means), length.out = 1000)   
+  
+  risks <- numeric(length(target_returns))  
+  weights <- matrix(0, nrow = length(target_returns), ncol = length(means))  
+  
+  valid_points <- rep(TRUE, length(target_returns))  
+  
+  for (j in seq_along(target_returns)) {  
+    target_return <- target_returns[j]  
+    #minimize cov-variance to plot the Froniter
+    Dmat <- cov_matrix  
+    dvec <- rep(0, length(means))  
+    Amat <- cbind(1, means, diag(length(means)))    
+    bvec <- c(1, target_return, rep(0, length(means)))  
+    meq <- 2  
+    
+    result <- tryCatch({  
+      solve.QP(Dmat, dvec, Amat, bvec, meq)  
+    }, error = function(e) {  
+      valid_points[j] <- FALSE    #if we can't generate this result, return null
+      return(NULL)   
+    })  
+    
+    if (is.null(result)) next  #select those returns that we can generate
+    
+    risks[j] <- sqrt(2*result$value)   
+    weights[j, ] <- result$solution    
+  }  
+  
+  
+  target_returns <- target_returns[valid_points]  
+  risks <- risks[valid_points]  
+  
+  valid_indices <- which(risks > 0 & !duplicated(target_returns))  
+  target_returns <- target_returns[valid_indices]  
+  risks <- risks[valid_indices]  
+  
+  if (length(risks) > 0 && length(target_returns) > 0) {  
+    # get the optimal weights under non-negative constrain
+    opt_Amat <- cbind(1, diag(length(means)))  
+    opt_bvec <- c(1,  rep(0, length(means)))  
+    opt_meq <- 1
+    opt_result <-solve.QP(cov_matrix, means, opt_Amat, opt_bvec, opt_meq)
+    opt_value <- opt_result$solution %*% means
+    opt_risk <- sqrt(2*(opt_result$value+opt_value))
+    max_slope <- opt_value/opt_risk
+    nonnegative_weight_list[[i]] <- opt_result$solution
+    
+    #plot the annualized return of each asset
+    asset_risks <- sqrt(diag(cov_matrix))  
+    asset_returns <- means
+    #set the range of the whole plot
+    xlim_range <- range(min(sqrt(diag(cov_matrix)))-0.1,max(sqrt(diag(cov_matrix)))+0.05)   
+  
+    ylim_range <- range(min(means)*1.1,max(means)*1.1)   
+
+    plot(risks, target_returns, type = "l", col = "blue", lwd = 2,  
+         xlab = "Risk (Standard Deviation)", ylab = "Expected Return",  
+         main = paste0("Markowitz Frontier under non-negative case during ", 2009 + i, "-", 2013 + i),
+         xlim=xlim_range,ylim=ylim_range)  
+    
+    #abline(a = 0, b = max_slope, col = "red", lwd = 2, lty = 2)   
+    points(opt_risk, opt_value, col = "red", pch = 19, cex = 1.5)   
+    
+    colors <- rainbow(length(asset_risks))    
+    points(asset_risks, asset_returns, col = colors, pch = 17, cex = 1.2)   
+    legend("topleft",   
+       legend = c(asset_names, "Tangent Point"),   
+       col = c(colors, "red"),    
+       pch = c(rep(17, length(asset_names)), 19),  
+       cex = 0.6)  
+  }  
+}
+```
+
+The results show that we cannot generate returns greater than the
+maximum from any single asset, the optimal weighting selects SP500 in
+most cases. This is because of SP500's excellent return characteristics,
+exhibiting relatively high return and a low risk.
+
+## Optimal weights for each asset across rolling windows
+
+```{r}
+nonnegative_weight_df <- data.frame(do.call(rbind, nonnegative_weight_list))
+rownames(nonnegative_weight_df) <- paste("Dataset", seq_along(nonnegative_weight_df)) 
+```
+
+```{r fig.cap="Optimal Weights under Non-negative Case Across asset"}
+par(mar = c(5, 4, 4, 8), xpd = TRUE)    
+plot(  
+  x = seq_len(nrow(nonnegative_weight_df)),    
+  y = nonnegative_weight_df[, 1],            
+  type = "n",                             
+  xlab = "Window Index",                  
+  ylab = "Weights",                
+  #main = "Optimal Weights Across Assets",   
+  ylim = range(nonnegative_weight_df, na.rm = TRUE)    
+)  
+
+ 
+for (i in seq_len(ncol(nonnegative_weight_df))) {  
+  lines(  
+    x = seq_len(nrow(nonnegative_weight_df)),   
+    y = nonnegative_weight_df[, i],            
+    col = i                                  
+  )  
+}  
+
+legend(  
+  "topright",                              
+  inset = c(-0.4, 0),                        
+  legend = c("TSX", "CAC", "DAX", "Eurostoxx50", "NIKKEI225", "FTSE100", "SP500", "IBOVESPA"),   
+  col = seq_len(ncol(nonnegative_weight_df)),   
+  lty = 1,                                   
+  xpd = TRUE,                                
+  cex = 0.8   
+)
+```
+
+The plot for non-negative optimal weights shows a similar result. The
+bulk of the portfolio is allocated to SP500 if we cannot short.
+Additionally, particularly in recent years, IBOVESPA and NIKKEI225 also
+contribute to the optimal choice.
+
+# Comparison with Cap-based Weights
+
+Finally, we compare our result with cap-based weights. Since those
+cap-based weights are all non-negative, we will use the non-negative
+weights we got in Q2.
+
+```{r echo=TRUE}
+#The excess return of these two different weights are:
+weights_capbased <- c(4.18,4.32,3.62,9.1,9.25,8.16,60.23,1.14)/100
+return_capbased <-round(weights_capbased%*%mu,2)
+return_ourresult <- round(non_opt_result$solution%*%mu,2)
+print(paste0("The cap-based excess return is: ",
+             as.character(return_capbased)))
+print(paste0("The excess return of our result is: ",
+             as.character(return_ourresult)))
+
+risk_capbased <-round(sqrt(weights_capbased%*%var_cov_matrix
+                      %*%weights_capbased),3)
+risk_ourresult <-round(sqrt(non_opt_result$solution%*%var_cov_matrix
+                      %*%non_opt_result$solution),3)
+print(paste0("The cap-based risk is: ",
+             as.character(risk_capbased)))
+print(paste0("The risk of our result is: ",
+             as.character(risk_ourresult)))
+
+utility_capbased <-round(return_capbased-0.5*risk_capbased^2,3)
+utility_ourresult <-round(return_ourresult-0.5*risk_ourresult^2,3)
+print(paste0("The cap-based utility is: ",
+             as.character(utility_capbased)))
+print(paste0("The utility of our result is: ",
+             as.character(utility_ourresult)))
+```
+
+From this result, we can see that our result in Q2 has a higher return,
+a slightly higher risk, but a higher utility. In this aspect, our result
+is better than cap-based weights
+
+# Conclusion
+
+This report examines the application of mean-variance optimisation to
+equity index returns, highlighting both theoretical insights and
+practical limitations. While daily log returns deviate from the i.i.d.
+Gaussian assumptions due to heavy tails and time-varying volatility,
+their independence supports the use of mean-variance techniques under
+practical constraints.
+
+The analysis demonstrates that allowing short sales increases portfolio
+efficiency and Sharpe ratios but results in extreme and impractical
+weight allocations, often requiring high leverage. Conversely,
+portfolios with short-sale restrictions exhibit more stable and
+implementable weights but suffer from reduced diversification and
+efficiency, frequently allocating entirely to a single asset such as the
+S&P 500. The rolling window analysis further illustrates how market
+dynamics influence portfolio composition, with non-negative constraints
+yielding consistent but concentrated allocations.
+
+These findings emphasise the sensitivity of mean-variance optimisation
+to input assumptions and constraints, underscoring the importance of
+incorporating practical considerations such as transaction costs,
+regulatory limits, and market conditions when constructing real-world
+portfolios.
