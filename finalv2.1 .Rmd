@@ -1,13 +1,8 @@
 ---
-title: Assignment 1  
+title: Markowitz Efficient Portfolio  
 author: | 
   | Group 7
-  | Bruna Travassos - 06019712
-  | Xucheng Yang - 06003464
-  | Louis Kenyon - 06029848
-  | Mike Limnidis - 06013422
-  | Katrina Ho - 06007111
-  | Business School, Imperial College London
+  | Imperial College London
   | 
   
 date: "22/01/2025"
